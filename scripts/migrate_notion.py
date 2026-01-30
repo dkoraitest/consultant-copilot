@@ -11,12 +11,18 @@
 """
 import asyncio
 import os
+import sys
 from datetime import datetime
 
+# Добавляем корень проекта в path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from notion_client import Client as NotionClient
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import select
 from dotenv import load_dotenv
+
+from src.database.models import Meeting
 
 load_dotenv()
 
@@ -27,7 +33,7 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "dafded61cc2b4fc0997c292359
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgresql://", "postgresql+asyncpg://")
 
 
-async def fetch_notion_pages(notion: NotionClient, database_id: str) -> list:
+def fetch_notion_pages(notion: NotionClient, database_id: str) -> list:
     """Получить все страницы из Notion базы"""
     pages = []
     has_more = True
@@ -47,7 +53,11 @@ async def fetch_notion_pages(notion: NotionClient, database_id: str) -> list:
 
 def extract_page_content(notion: NotionClient, page_id: str) -> str:
     """Извлечь текстовое содержимое страницы Notion"""
-    blocks = notion.blocks.children.list(block_id=page_id)
+    try:
+        blocks = notion.blocks.children.list(block_id=page_id)
+    except Exception:
+        return ""
+
     content_parts = []
 
     for block in blocks["results"]:
@@ -65,9 +75,17 @@ def extract_page_content(notion: NotionClient, page_id: str) -> str:
             texts = block["heading_2"].get("rich_text", [])
             content_parts.append("## " + "".join(t["plain_text"] for t in texts))
 
+        elif block_type == "heading_3":
+            texts = block["heading_3"].get("rich_text", [])
+            content_parts.append("### " + "".join(t["plain_text"] for t in texts))
+
         elif block_type == "bulleted_list_item":
             texts = block["bulleted_list_item"].get("rich_text", [])
             content_parts.append("• " + "".join(t["plain_text"] for t in texts))
+
+        elif block_type == "numbered_list_item":
+            texts = block["numbered_list_item"].get("rich_text", [])
+            content_parts.append("- " + "".join(t["plain_text"] for t in texts))
 
     return "\n".join(content_parts)
 
@@ -76,24 +94,41 @@ def parse_notion_page(page: dict, notion: NotionClient) -> dict:
     """Парсинг страницы Notion в данные встречи"""
     properties = page["properties"]
 
-    # Извлекаем поля
+    # Извлекаем title - пробуем разные варианты названий полей
     title = ""
-    if "Meeting Name" in properties:
-        title_prop = properties["Meeting Name"]
-        if title_prop["type"] == "title":
-            title = "".join(t["plain_text"] for t in title_prop["title"])
+    for title_field in ["Meeting Name", "Name", "Title", "Название"]:
+        if title_field in properties:
+            title_prop = properties[title_field]
+            if title_prop["type"] == "title" and title_prop["title"]:
+                title = "".join(t["plain_text"] for t in title_prop["title"])
+                break
 
+    # Если title пустой, пробуем взять из других полей
+    if not title:
+        title = f"Meeting from Notion ({page['id'][:8]})"
+
+    # Извлекаем дату
     meeting_date = None
-    if "Meeting Date" in properties:
-        date_prop = properties["Meeting Date"]
-        if date_prop["type"] == "date" and date_prop["date"]:
-            meeting_date = datetime.fromisoformat(date_prop["date"]["start"])
+    for date_field in ["Meeting Date", "Date", "Дата"]:
+        if date_field in properties:
+            date_prop = properties[date_field]
+            if date_prop["type"] == "date" and date_prop["date"]:
+                try:
+                    meeting_date = datetime.fromisoformat(
+                        date_prop["date"]["start"].replace("Z", "+00:00")
+                    )
+                except Exception:
+                    pass
+                break
 
+    # Извлекаем fireflies_id
     fireflies_id = None
-    if "Transcript ID" in properties:
-        id_prop = properties["Transcript ID"]
-        if id_prop["type"] == "rich_text" and id_prop["rich_text"]:
-            fireflies_id = id_prop["rich_text"][0]["plain_text"]
+    for id_field in ["Transcript ID", "Fireflies ID", "ID"]:
+        if id_field in properties:
+            id_prop = properties[id_field]
+            if id_prop["type"] == "rich_text" and id_prop["rich_text"]:
+                fireflies_id = id_prop["rich_text"][0]["plain_text"]
+                break
 
     # Получаем содержимое страницы (транскрипт)
     transcript = extract_page_content(notion, page["id"])
@@ -102,8 +137,7 @@ def parse_notion_page(page: dict, notion: NotionClient) -> dict:
         "title": title,
         "date": meeting_date,
         "fireflies_id": fireflies_id,
-        "transcript": transcript,
-        "notion_id": page["id"]
+        "transcript": transcript if transcript else None,
     }
 
 
@@ -127,43 +161,72 @@ async def migrate():
     print(f"Подключение к Notion базе: {NOTION_DATABASE_ID}")
 
     # Получение страниц
-    print("Загрузка страниц...")
-    pages = await asyncio.get_event_loop().run_in_executor(
+    print("Загрузка страниц из Notion...")
+    loop = asyncio.get_event_loop()
+    pages = await loop.run_in_executor(
         None,
         lambda: fetch_notion_pages(notion, NOTION_DATABASE_ID)
     )
     print(f"Найдено страниц: {len(pages)}")
+    print()
 
     # Подключение к PostgreSQL
-    engine = create_async_engine(DATABASE_URL)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     # Миграция
     migrated = 0
+    skipped = 0
     errors = 0
 
-    for i, page in enumerate(pages, 1):
-        try:
-            data = parse_notion_page(page, notion)
-            print(f"[{i}/{len(pages)}] {data['title'][:50]}...")
+    async with async_session() as session:
+        for i, page in enumerate(pages, 1):
+            try:
+                # Парсим данные из Notion
+                data = await loop.run_in_executor(
+                    None,
+                    lambda p=page: parse_notion_page(p, notion)
+                )
 
-            # TODO: Сохранение в БД
-            # async with async_session() as session:
-            #     meeting = Meeting(**data)
-            #     session.add(meeting)
-            #     await session.commit()
+                title_short = data['title'][:50] if data['title'] else "Без названия"
+                print(f"[{i}/{len(pages)}] {title_short}...", end=" ")
 
-            migrated += 1
+                # Проверяем, не существует ли уже такая встреча
+                if data["fireflies_id"]:
+                    existing = await session.execute(
+                        select(Meeting).where(Meeting.fireflies_id == data["fireflies_id"])
+                    )
+                    if existing.scalar_one_or_none():
+                        print("(пропуск - уже есть)")
+                        skipped += 1
+                        continue
 
-        except Exception as e:
-            print(f"  Ошибка: {e}")
-            errors += 1
+                # Создаём новую встречу
+                meeting = Meeting(
+                    title=data["title"],
+                    date=data["date"],
+                    fireflies_id=data["fireflies_id"],
+                    transcript=data["transcript"],
+                )
+                session.add(meeting)
+                await session.commit()
+
+                print("✓")
+                migrated += 1
+
+            except Exception as e:
+                print(f"✗ Ошибка: {e}")
+                errors += 1
+                await session.rollback()
+
+    await engine.dispose()
 
     print()
     print("=" * 50)
     print(f"Миграция завершена")
-    print(f"Успешно: {migrated}")
-    print(f"Ошибок: {errors}")
+    print(f"  Добавлено: {migrated}")
+    print(f"  Пропущено: {skipped}")
+    print(f"  Ошибок: {errors}")
     print("=" * 50)
 
 
