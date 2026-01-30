@@ -263,6 +263,16 @@ class HypothesisRepository:
         )
         return list(result.scalars().all())
 
+    async def list_active(self, limit: int = 20) -> list[Hypothesis]:
+        """Список активных гипотез (active и testing)"""
+        result = await self.session.execute(
+            select(Hypothesis)
+            .where(Hypothesis.status.in_(["active", "testing"]))
+            .order_by(Hypothesis.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def update_status(
         self,
         hypothesis_id: UUID,

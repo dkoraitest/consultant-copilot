@@ -9,6 +9,7 @@ from src.bot.handlers import (
     start_handler,
     help_handler,
     meeting_type_callback,
+    menu_callback,
 )
 
 logging.basicConfig(
@@ -29,6 +30,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CallbackQueryHandler(meeting_type_callback, pattern="^type:"))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
 
     # Запуск
     logger.info("Starting bot...")

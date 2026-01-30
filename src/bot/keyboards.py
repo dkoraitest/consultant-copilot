@@ -4,6 +4,17 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню бота"""
+    keyboard = [
+        [
+            InlineKeyboardButton("❓ Справка", callback_data="menu:help"),
+            InlineKeyboardButton("💡 Гипотезы", callback_data="menu:hypotheses"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_meeting_type_keyboard(meeting_id: str) -> InlineKeyboardMarkup:
     """Клавиатура выбора типа встречи"""
     keyboard = [

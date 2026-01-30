@@ -7,9 +7,9 @@ from uuid import UUID
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from src.bot.keyboards import get_meeting_type_keyboard
+from src.bot.keyboards import get_meeting_type_keyboard, get_main_menu_keyboard
 from src.database.connection import async_session_maker
-from src.database.repository import MeetingRepository, SummaryRepository
+from src.database.repository import MeetingRepository, SummaryRepository, HypothesisRepository
 from src.summarizer.engine import SummarizerEngine
 
 logger = logging.getLogger(__name__)
@@ -25,12 +25,11 @@ MEETING_TYPE_NAMES = {
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
+    keyboard = get_main_menu_keyboard()
     await update.message.reply_text(
         "Привет! Я Consultant Copilot.\n\n"
-        "Я помогу создавать саммари встреч.\n\n"
-        "Команды:\n"
-        "/help - Справка\n"
-        "/hypotheses - Активные гипотезы"
+        "Я помогу создавать саммари встреч.",
+        reply_markup=keyboard
     )
 
 
@@ -38,13 +37,58 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     await update.message.reply_text(
         "*Типы встреч:*\n\n"
-        "- *Рабочая* — внутренняя встреча с командой\n"
-        "- *Диагностика* — первая встреча с клиентом\n"
-        "- *Трекшн* — еженедельный созвон с клиентом\n"
-        "- *Интро* — первое знакомство\n\n"
+        "📋 *Рабочая* — внутренняя встреча с командой\n"
+        "🔍 *Диагностика* — первая встреча с клиентом\n"
+        "📊 *Трекшн* — еженедельный созвон с клиентом\n"
+        "👋 *Интро* — первое знакомство\n\n"
         "Саммари генерируется автоматически после получения транскрипта от Fireflies.",
         parse_mode="Markdown"
     )
+
+
+HELP_TEXT = (
+    "*Типы встреч:*\n\n"
+    "📋 *Рабочая* — внутренняя встреча с командой\n"
+    "🔍 *Диагностика* — первая встреча с клиентом\n"
+    "📊 *Трекшн* — еженедельный созвон с клиентом\n"
+    "👋 *Интро* — первое знакомство\n\n"
+    "Саммари генерируется автоматически после получения транскрипта от Fireflies."
+)
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки главного меню"""
+    query = update.callback_query
+    await query.answer()
+
+    _, action = query.data.split(":")
+
+    if action == "help":
+        await query.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+
+    elif action == "hypotheses":
+        try:
+            async with async_session_maker() as session:
+                repo = HypothesisRepository(session)
+                hypotheses = await repo.list_active()
+
+                if not hypotheses:
+                    await query.message.reply_text("Нет активных гипотез.")
+                    return
+
+                text = "*Активные гипотезы:*\n\n"
+                for h in hypotheses[:10]:  # Лимит 10
+                    status_emoji = {"active": "🟡", "testing": "🔵", "validated": "✅", "failed": "❌"}.get(h.status, "⚪")
+                    text += f"{status_emoji} *{h.title}*\n"
+                    if h.quarter:
+                        text += f"   Квартал: {h.quarter}\n"
+                    text += "\n"
+
+                await query.message.reply_text(text, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Error fetching hypotheses: {e}")
+            await query.message.reply_text("Ошибка при получении гипотез.")
 
 
 async def send_meeting_notification(
