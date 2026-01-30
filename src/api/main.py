@@ -36,11 +36,17 @@ async def health():
     return {"status": "healthy"}
 
 
-# TODO: Подключить роуты
-# from src.api.routes import meetings, summaries, clients, tasks, leads, webhooks
-# app.include_router(meetings.router, prefix="/api/meetings", tags=["meetings"])
-# app.include_router(summaries.router, prefix="/api/summaries", tags=["summaries"])
-# app.include_router(clients.router, prefix="/api/clients", tags=["clients"])
-# app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
-# app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
-# app.include_router(webhooks.router, prefix="/api/webhook", tags=["webhooks"])
+# Роуты
+from src.api.routes import (
+    meetings_router,
+    summaries_router,
+    clients_router,
+    hypotheses_router,
+    webhooks_router,
+)
+
+app.include_router(meetings_router, prefix="/api/meetings", tags=["meetings"])
+app.include_router(summaries_router, prefix="/api/summaries", tags=["summaries"])
+app.include_router(clients_router, prefix="/api/clients", tags=["clients"])
+app.include_router(hypotheses_router, prefix="/api/hypotheses", tags=["hypotheses"])
+app.include_router(webhooks_router, prefix="/api/webhook", tags=["webhooks"])

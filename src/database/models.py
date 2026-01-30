@@ -58,6 +58,7 @@ class Client(Base):
 
     # Relationships
     meetings: Mapped[list["Meeting"]] = relationship(back_populates="client")
+    hypotheses: Mapped[list["Hypothesis"]] = relationship(back_populates="client")
 
 
 class Lead(Base):
@@ -71,6 +72,41 @@ class Lead(Base):
     channel: Mapped[str | None] = mapped_column(String(100))
     status: Mapped[str] = mapped_column(String(50), default="new")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Hypothesis(Base):
+    """Гипотеза клиента для тестирования"""
+    __tablename__ = "hypotheses"
+
+    id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    client_id: Mapped[UUID] = mapped_column(ForeignKey("clients.id"))
+
+    # Описание гипотезы
+    title: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str | None] = mapped_column(Text)
+
+    # Критерии успеха
+    success_criteria: Mapped[dict | None] = mapped_column(JSONB)
+    # Пример: {"metric": "конверсия", "target": ">5%", "baseline": "2%"}
+
+    # Статус и результаты
+    status: Mapped[str] = mapped_column(String(50), default="active")
+    # active, testing, validated, failed, paused
+    result: Mapped[str | None] = mapped_column(Text)
+    result_data: Mapped[dict | None] = mapped_column(JSONB)
+    # Пример: {"actual": "6.2%", "delta": "+4.2%", "conclusion": "успех"}
+
+    # Временные рамки
+    quarter: Mapped[str | None] = mapped_column(String(10))  # "Q1 2026"
+    tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Связь с встречей, где гипотеза обсуждалась
+    meeting_id: Mapped[UUID | None] = mapped_column(ForeignKey("meetings.id"))
+
+    # Relationships
+    client: Mapped["Client"] = relationship(back_populates="hypotheses")
+    meeting: Mapped["Meeting"] = relationship()
 
 
 # Для Этапа 2: Embeddings
