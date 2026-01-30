@@ -47,7 +47,7 @@ services:
     restart: unless-stopped
 
   # ================================================
-  # Telegram Bot (отдельный процесс)
+  # Telegram Bot - Summary (отдельный процесс)
   # ================================================
   bot:
     build:
@@ -65,6 +65,27 @@ services:
       - ./src:/app/src
       - ./config:/app/config
     command: python -m src.bot.main
+    restart: unless-stopped
+
+  # ================================================
+  # Telegram Bot - Q&A (RAG поиск)
+  # ================================================
+  qa_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: copilot-qa-bot
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://copilot:${DB_PASSWORD}@db:5432/copilot
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    command: python -m src.qa_bot.main
     restart: unless-stopped
 
 volumes:

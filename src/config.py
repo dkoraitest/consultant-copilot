@@ -11,9 +11,12 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
-    # Telegram Bot
+    # Telegram Bot (Summary)
     telegram_bot_token: str
     telegram_admin_chat_id: int
+
+    # Telegram Q&A Bot
+    qa_bot_token: str | None = None
 
     # Telegram User API (Telethon)
     telegram_api_id: int | None = None

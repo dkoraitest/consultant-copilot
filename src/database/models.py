@@ -4,9 +4,10 @@ SQLAlchemy модели базы данных
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import String, Text, DateTime, ForeignKey, BigInteger
+from sqlalchemy import String, Text, DateTime, ForeignKey, BigInteger, Integer
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -109,14 +110,16 @@ class Hypothesis(Base):
     meeting: Mapped["Meeting"] = relationship()
 
 
-# Для Этапа 2: Embeddings
-# class Embedding(Base):
-#     """Эмбеддинги для RAG"""
-#     __tablename__ = "embeddings"
-#
-#     id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-#     meeting_id: Mapped[UUID] = mapped_column(ForeignKey("meetings.id"))
-#     chunk_text: Mapped[str] = mapped_column(Text)
-#     embedding = mapped_column(Vector(1536))  # pgvector
-#     chunk_index: Mapped[int] = mapped_column()
-#     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+class Embedding(Base):
+    """Эмбеддинги чанков транскриптов для RAG"""
+    __tablename__ = "embeddings"
+
+    id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    meeting_id: Mapped[UUID] = mapped_column(ForeignKey("meetings.id", ondelete="CASCADE"))
+    chunk_text: Mapped[str] = mapped_column(Text)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    embedding = mapped_column(Vector(1536))  # OpenAI text-embedding-ada-002
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    meeting: Mapped["Meeting"] = relationship()

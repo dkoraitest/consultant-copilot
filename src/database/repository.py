@@ -4,10 +4,10 @@ Repository pattern для работы с БД
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database.models import Meeting, Summary, Client, Lead, Hypothesis
+from src.database.models import Meeting, Summary, Client, Lead, Hypothesis, Embedding
 
 
 class MeetingRepository:
@@ -321,3 +321,52 @@ class HypothesisRepository:
         )
 
         return stats
+
+
+class EmbeddingRepository:
+    """Репозиторий для работы с эмбеддингами"""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_by_meeting(self, meeting_id: UUID) -> list[Embedding]:
+        """Получить все эмбеддинги встречи"""
+        result = await self.session.execute(
+            select(Embedding)
+            .where(Embedding.meeting_id == meeting_id)
+            .order_by(Embedding.chunk_index)
+        )
+        return list(result.scalars().all())
+
+    async def delete_by_meeting(self, meeting_id: UUID) -> int:
+        """Удалить все эмбеддинги встречи"""
+        result = await self.session.execute(
+            delete(Embedding).where(Embedding.meeting_id == meeting_id)
+        )
+        await self.session.commit()
+        return result.rowcount
+
+    async def count_by_meeting(self, meeting_id: UUID) -> int:
+        """Количество чанков для встречи"""
+        result = await self.session.execute(
+            select(func.count(Embedding.id)).where(Embedding.meeting_id == meeting_id)
+        )
+        return result.scalar() or 0
+
+    async def get_indexed_meeting_ids(self) -> list[UUID]:
+        """Получить ID всех проиндексированных встреч"""
+        result = await self.session.execute(
+            select(Embedding.meeting_id).distinct()
+        )
+        return [row[0] for row in result.fetchall()]
+
+    async def stats(self) -> dict:
+        """Статистика индекса"""
+        total_chunks = await self.session.execute(select(func.count(Embedding.id)))
+        indexed_meetings = await self.session.execute(
+            select(func.count(func.distinct(Embedding.meeting_id)))
+        )
+        return {
+            "total_chunks": total_chunks.scalar() or 0,
+            "indexed_meetings": indexed_meetings.scalar() or 0,
+        }

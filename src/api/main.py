@@ -43,6 +43,7 @@ from src.api.routes import (
     clients_router,
     hypotheses_router,
     webhooks_router,
+    rag_router,
 )
 
 app.include_router(meetings_router, prefix="/api/meetings", tags=["meetings"])
@@ -50,3 +51,4 @@ app.include_router(summaries_router, prefix="/api/summaries", tags=["summaries"]
 app.include_router(clients_router, prefix="/api/clients", tags=["clients"])
 app.include_router(hypotheses_router, prefix="/api/hypotheses", tags=["hypotheses"])
 app.include_router(webhooks_router, prefix="/api/webhook", tags=["webhooks"])
+app.include_router(rag_router, prefix="/api/rag", tags=["rag"])

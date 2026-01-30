@@ -1,0 +1,126 @@
+"""
+Обработчики сообщений Q&A бота
+"""
+import logging
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from src.database.connection import async_session_maker
+from src.services.rag_service import RAGService
+from src.database.repository import EmbeddingRepository
+
+logger = logging.getLogger(__name__)
+
+
+WELCOME_MESSAGE = """👋 Привет! Я Q&A бот Consultant Copilot.
+
+Задайте вопрос по истории встреч, и я найду ответ в транскриптах.
+
+*Примеры вопросов:*
+• Какие гипотезы обсуждались с клиентом X?
+• Что решили по продукту на прошлой неделе?
+• Какие метрики упоминались?
+• О чём говорили на встрече с Y?
+
+Просто напишите свой вопрос 👇"""
+
+
+HELP_MESSAGE = """*Как пользоваться ботом:*
+
+1. Просто напишите вопрос
+2. Бот найдёт релевантные фрагменты из транскриптов
+3. Claude сформирует ответ на основе найденного
+
+*Команды:*
+/start — начать работу
+/help — эта справка
+/stats — статистика индекса
+
+*Совет:* Чем конкретнее вопрос, тем точнее ответ."""
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    await update.message.reply_text(
+        WELCOME_MESSAGE,
+        parse_mode="Markdown"
+    )
+
+
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    await update.message.reply_text(
+        HELP_MESSAGE,
+        parse_mode="Markdown"
+    )
+
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /stats"""
+    try:
+        async with async_session_maker() as session:
+            repo = EmbeddingRepository(session)
+            stats = await repo.stats()
+
+        await update.message.reply_text(
+            f"📊 *Статистика индекса:*\n\n"
+            f"Проиндексировано встреч: {stats['indexed_meetings']}\n"
+            f"Всего чанков: {stats['total_chunks']}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in stats: {e}")
+        await update.message.reply_text("Ошибка при получении статистики.")
+
+
+async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка вопросов пользователя"""
+    question = update.message.text
+
+    if not question or len(question) < 3:
+        await update.message.reply_text(
+            "Пожалуйста, задайте более развёрнутый вопрос."
+        )
+        return
+
+    # Показываем, что бот думает
+    thinking_msg = await update.message.reply_text("🔍 Ищу ответ в транскриптах...")
+
+    try:
+        async with async_session_maker() as session:
+            rag = RAGService(session)
+            answer, sources = await rag.ask(question)
+
+        # Формируем ответ
+        response = answer
+
+        # Добавляем источники
+        if sources:
+            response += "\n\n📚 *Источники:*"
+            seen_titles = set()
+            for s in sources[:5]:
+                if s.meeting_title not in seen_titles:
+                    seen_titles.add(s.meeting_title)
+                    date_str = f" ({s.meeting_date[:10]})" if s.meeting_date else ""
+                    response += f"\n• {s.meeting_title}{date_str}"
+
+        # Удаляем сообщение "Ищу ответ..."
+        await thinking_msg.delete()
+
+        # Отправляем ответ
+        await update.message.reply_text(
+            response,
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.error(f"Error answering question: {e}")
+        await thinking_msg.edit_text(
+            f"❌ Ошибка при обработке вопроса. Попробуйте позже.\n\nДетали: {str(e)[:100]}"
+        )
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Exception while handling an update: {context.error}")
