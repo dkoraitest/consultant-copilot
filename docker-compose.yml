@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # ================================================
+  # PostgreSQL с pgvector
+  # ================================================
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: copilot-db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      POSTGRES_DB: copilot
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ================================================
+  # FastAPI Application
+  # ================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: copilot-app
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://copilot:${DB_PASSWORD}@db:5432/copilot
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  # ================================================
+  # Telegram Bot (отдельный процесс)
+  # ================================================
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: copilot-bot
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://copilot:${DB_PASSWORD}@db:5432/copilot
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    command: python -m src.bot.main
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  default:
+    name: copilot-network

@@ -1,0 +1,63 @@
+# Конфигурация типов встреч
+# Добавляйте новые типы по аналогии
+
+meeting_types:
+  working_meeting:
+    name: "Рабочая встреча"
+    description: "Внутренняя встреча с командой"
+    emoji: "📋"
+    button_text: "Рабочая"
+    prompt_file: "prompts/working_meeting.md"
+    char_limit: 3600
+    allow_names: true
+    end_marker: "[END]"
+
+  diagnostics:
+    name: "Диагностика"
+    description: "Первая встреча с клиентом по TOC"
+    emoji: "🔍"
+    button_text: "Диагностика"
+    prompt_file: "prompts/diagnostics.md"
+    char_limit: null  # без лимита
+    allow_names: true
+    formal_you: true  # обращение на "вы"
+    send_to_client: true
+
+  traction:
+    name: "Трекшн"
+    description: "Еженедельная встреча с клиентом"
+    emoji: "📊"
+    button_text: "Трекшн"
+    prompt_file: "prompts/traction.md"
+    char_limit: 4000
+    allow_names: false  # имена запрещены
+    focus:
+      - hypotheses
+      - metrics
+      - tasks
+      - blockers
+
+  intro:
+    name: "Интро"
+    description: "Первое знакомство"
+    emoji: "👋"
+    button_text: "Интро"
+    prompt_file: "prompts/intro.md"
+    char_limit: null
+    allow_names: true
+    short_format: true
+
+# Настройки по умолчанию
+defaults:
+  model: "claude-3-5-sonnet-20241022"
+  max_tokens: 4096
+  temperature: 0.3
+
+# Кнопки в Telegram (порядок отображения)
+button_layout:
+  - row:
+      - working_meeting
+      - diagnostics
+  - row:
+      - traction
+      - intro
