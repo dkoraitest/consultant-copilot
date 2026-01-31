@@ -59,15 +59,19 @@ class RAGService:
         # Создаём эмбеддинг запроса
         query_embedding = self.embeddings.embed_query(query)
 
+        # Форматируем вектор для pgvector
+        vector_str = "[" + ",".join(map(str, query_embedding)) + "]"
+
         # Формируем SQL запрос с pgvector
         # Используем cosine distance (1 - cosine_similarity)
-        sql = """
+        # Вектор вставляется напрямую, т.к. он генерируется нами (безопасно)
+        sql = f"""
             SELECT
                 e.chunk_text,
                 e.meeting_id,
                 m.title as meeting_title,
                 m.date as meeting_date,
-                1 - (e.embedding <=> :query_embedding::vector) as similarity
+                1 - (e.embedding <=> '{vector_str}'::vector) as similarity
             FROM embeddings e
             JOIN meetings m ON e.meeting_id = m.id
         """
@@ -75,15 +79,12 @@ class RAGService:
         if client_id:
             sql += " WHERE m.client_id = :client_id"
 
-        sql += """
-            ORDER BY e.embedding <=> :query_embedding::vector
+        sql += f"""
+            ORDER BY e.embedding <=> '{vector_str}'::vector
             LIMIT :limit
         """
 
-        params = {
-            "query_embedding": str(query_embedding),
-            "limit": limit,
-        }
+        params = {"limit": limit}
         if client_id:
             params["client_id"] = str(client_id)
 
