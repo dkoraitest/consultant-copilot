@@ -36,7 +36,7 @@ class RAGService:
         self.embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
         self.llm = ChatAnthropic(
             model="claude-sonnet-4-20250514",
-            api_key=settings.anthropic_api_key,
+            anthropic_api_key=settings.anthropic_api_key,
         )
 
     async def search_similar(
