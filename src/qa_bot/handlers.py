@@ -97,7 +97,7 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Добавляем источники
         if sources:
-            response += "\n\n📚 *Источники:*"
+            response += "\n\n📚 Источники:"
             seen_titles = set()
             for s in sources[:5]:
                 if s.meeting_title not in seen_titles:
@@ -106,19 +106,30 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     response += f"\n• {s.meeting_title}{date_str}"
 
         # Удаляем сообщение "Ищу ответ..."
-        await thinking_msg.delete()
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
 
-        # Отправляем ответ
-        await update.message.reply_text(
-            response,
-            parse_mode="Markdown"
-        )
+        # Отправляем ответ (без parse_mode, т.к. Claude может вернуть символы
+        # которые конфликтуют с Telegram Markdown парсером)
+        # Разбиваем на части если ответ слишком длинный (лимит Telegram 4096)
+        if len(response) <= 4096:
+            await update.message.reply_text(response)
+        else:
+            for i in range(0, len(response), 4096):
+                await update.message.reply_text(response[i:i+4096])
 
     except Exception as e:
         logger.error(f"Error answering question: {e}")
-        await thinking_msg.edit_text(
-            f"❌ Ошибка при обработке вопроса. Попробуйте позже.\n\nДетали: {str(e)[:100]}"
-        )
+        try:
+            await thinking_msg.edit_text(
+                f"❌ Ошибка при обработке вопроса. Попробуйте позже.\n\nДетали: {str(e)[:100]}"
+            )
+        except Exception:
+            await update.message.reply_text(
+                f"❌ Ошибка при обработке вопроса. Попробуйте позже."
+            )
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
