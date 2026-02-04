@@ -22,7 +22,7 @@ router = APIRouter()
 class AskRequest(BaseModel):
     question: str
     client_id: UUID | None = None
-    num_chunks: int = 5
+    num_chunks: int = 12
 
 
 class SourceInfo(BaseModel):

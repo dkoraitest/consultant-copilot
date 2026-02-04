@@ -39,11 +39,53 @@ class RAGService:
             anthropic_api_key=settings.anthropic_api_key,
         )
 
+    async def _find_client_filter(self, question: str) -> str | None:
+        """
+        Попытаться найти имя клиента/компании в вопросе,
+        сопоставив с заголовками встреч в базе.
+        """
+        result = await self.session.execute(
+            text("SELECT DISTINCT title FROM meetings WHERE title IS NOT NULL")
+        )
+        titles = [row[0] for row in result.fetchall()]
+
+        question_lower = question.lower()
+
+        # Извлекаем имена клиентов из заголовков (часть до " - ")
+        client_names = set()
+        for title in titles:
+            parts = title.split(" - ")
+            if parts:
+                client_name = parts[0].strip()
+                if len(client_name) > 2:
+                    client_names.add(client_name)
+
+        # Ищем лучшее совпадение с вопросом
+        best_match = None
+        best_match_len = 0
+        for client_name in client_names:
+            name_lower = client_name.lower()
+            # Проверяем полное имя клиента
+            if name_lower in question_lower:
+                if len(name_lower) > best_match_len:
+                    best_match = client_name
+                    best_match_len = len(name_lower)
+            else:
+                # Проверяем значимые слова (>3 символов)
+                for word in name_lower.split():
+                    if len(word) > 3 and word in question_lower:
+                        if len(word) > best_match_len:
+                            best_match = client_name
+                            best_match_len = len(word)
+
+        return best_match
+
     async def search_similar(
         self,
         query: str,
-        limit: int = 5,
-        client_id: UUID | None = None
+        limit: int = 12,
+        client_id: UUID | None = None,
+        title_filter: str | None = None
     ) -> list[SearchResult]:
         """
         Поиск похожих чанков по запросу.
@@ -52,19 +94,14 @@ class RAGService:
             query: Текст запроса
             limit: Максимальное количество результатов
             client_id: Фильтр по клиенту (опционально)
+            title_filter: Фильтр по заголовку встречи (опционально)
 
         Returns:
             Список результатов поиска с similarity score
         """
-        # Создаём эмбеддинг запроса
         query_embedding = self.embeddings.embed_query(query)
-
-        # Форматируем вектор для pgvector
         vector_str = "[" + ",".join(map(str, query_embedding)) + "]"
 
-        # Формируем SQL запрос с pgvector
-        # Используем cosine distance (1 - cosine_similarity)
-        # Вектор вставляется напрямую, т.к. он генерируется нами (безопасно)
         sql = f"""
             SELECT
                 e.chunk_text,
@@ -76,17 +113,24 @@ class RAGService:
             JOIN meetings m ON e.meeting_id = m.id
         """
 
+        conditions = []
+        params = {"limit": limit}
+
         if client_id:
-            sql += " WHERE m.client_id = :client_id"
+            conditions.append("m.client_id = :client_id")
+            params["client_id"] = str(client_id)
+
+        if title_filter:
+            conditions.append("LOWER(m.title) LIKE :title_filter")
+            params["title_filter"] = f"%{title_filter.lower()}%"
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
 
         sql += f"""
             ORDER BY e.embedding <=> '{vector_str}'::vector
             LIMIT :limit
         """
-
-        params = {"limit": limit}
-        if client_id:
-            params["client_id"] = str(client_id)
 
         result = await self.session.execute(text(sql), params)
         rows = result.fetchall()
@@ -106,7 +150,7 @@ class RAGService:
         self,
         question: str,
         client_id: UUID | None = None,
-        num_chunks: int = 5
+        num_chunks: int = 12
     ) -> tuple[str, list[SearchResult]]:
         """
         Ответить на вопрос по истории встреч.
@@ -119,8 +163,23 @@ class RAGService:
         Returns:
             Кортеж (ответ, список источников)
         """
-        # Поиск релевантных чанков
-        sources = await self.search_similar(question, limit=num_chunks, client_id=client_id)
+        # Автоматическое определение клиента из вопроса
+        title_filter = await self._find_client_filter(question)
+        if title_filter:
+            logger.info(f"Auto-detected client filter: {title_filter}")
+
+        # Поиск релевантных чанков (с фильтром по клиенту)
+        sources = await self.search_similar(
+            question, limit=num_chunks,
+            client_id=client_id, title_filter=title_filter
+        )
+
+        # Если с фильтром нашли мало — ищем без фильтра
+        if title_filter and len(sources) < 3:
+            logger.info(f"Too few results with filter '{title_filter}', searching without filter")
+            sources = await self.search_similar(
+                question, limit=num_chunks, client_id=client_id
+            )
 
         if not sources:
             return "К сожалению, я не нашёл релевантной информации по вашему вопросу.", []
@@ -135,17 +194,26 @@ class RAGService:
             )
         context = "\n\n---\n\n".join(context_parts)
 
-        # Создаём промпт
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """Ты — умный ассистент бизнес-консультанта. Твоя задача — отвечать на вопросы,
-используя контекст из транскриптов прошлых встреч.
+        # Дополнительный контекст о клиенте для промпта
+        filter_note = ""
+        if title_filter:
+            filter_note = f"\nВажно: пользователь спрашивает конкретно про клиента/компанию «{title_filter}». Фокусируйся ТОЛЬКО на информации об этом клиенте. Игнорируй данные о других клиентах."
 
-Правила:
-1. Отвечай на основе предоставленного контекста
-2. Если информации недостаточно, честно скажи об этом
-3. Указывай, из какой встречи взята информация, если это уместно
-4. Будь конкретным и полезным
-5. Отвечай на русском языке"""),
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """Ты — ассистент бизнес-консультанта. Отвечай на вопросы строго на основе предоставленных транскриптов встреч.
+{filter_note}
+
+ПРАВИЛА ОТВЕТА:
+1. Давай КОНКРЕТНЫЕ ответы с деталями из транскриптов:
+   - Цитируй ключевые фразы участников (в кавычках)
+   - Указывай даты встреч
+   - Перечисляй конкретные решения, договорённости, цифры, метрики
+   - Называй имена участников, если они упоминаются в контексте
+2. Структурируй ответ: используй нумерованные списки для перечислений
+3. Для каждого тезиса указывай источник — название встречи и дату
+4. Если информации недостаточно для полного ответа — честно скажи, чего не хватает
+5. НЕ придумывай и НЕ додумывай информацию, которой нет в контексте
+6. Отвечай на русском языке"""),
             ("human", """Контекст из транскриптов встреч:
 
 {context}
@@ -154,14 +222,14 @@ class RAGService:
 
 Вопрос: {question}
 
-Ответ:""")
+Дай подробный ответ с конкретными деталями из транскриптов:""")
         ])
 
-        # Генерируем ответ
         chain = prompt | self.llm
         response = await chain.ainvoke({
             "context": context,
-            "question": question
+            "question": question,
+            "filter_note": filter_note
         })
 
         return response.content, sources
