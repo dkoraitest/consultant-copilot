@@ -95,11 +95,11 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Формируем ответ
         response = answer
 
-        # Добавляем источники
+        # Добавляем источники (все уникальные встречи)
         if sources:
             response += "\n\n📚 Источники:"
             seen_titles = set()
-            for s in sources[:5]:
+            for s in sources:
                 if s.meeting_title not in seen_titles:
                     seen_titles.add(s.meeting_title)
                     date_str = f" ({s.meeting_date[:10]})" if s.meeting_date else ""
