@@ -2,6 +2,8 @@
 RAG сервис для Q&A по истории встреч
 """
 import logging
+import re
+from datetime import datetime, timedelta
 from uuid import UUID
 from dataclasses import dataclass
 from collections import OrderedDict
@@ -17,6 +19,14 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+@dataclass
+class DateRange:
+    """Временной диапазон для фильтрации"""
+    start: datetime
+    end: datetime
+    description: str  # Для логирования, напр. "Q4 2025"
 
 
 @dataclass
@@ -81,6 +91,148 @@ class RAGService:
 
         return best_match
 
+    def _parse_date_range(self, question: str) -> DateRange | None:
+        """
+        Извлечь временной диапазон из вопроса.
+        Поддерживает: кварталы, года, месяцы, "прошлый год/квартал/месяц".
+        """
+        question_lower = question.lower()
+        now = datetime.now()
+
+        # Определяем текущий год для относительных дат
+        current_year = now.year
+
+        # Паттерны для кварталов: "Q4 2025", "4 квартал 2025", "четвертый квартал"
+        quarter_patterns = [
+            (r'q([1-4])\s*(\d{4})', lambda m: (int(m.group(1)), int(m.group(2)))),
+            (r'(\d{4})\s*q([1-4])', lambda m: (int(m.group(2)), int(m.group(1)))),
+            (r'([1-4])\s*(?:й|ый|ой|ий)?\s*квартал\s*(\d{4})', lambda m: (int(m.group(1)), int(m.group(2)))),
+            (r'([1-4])\s*(?:й|ый|ой|ий)?\s*квартал', lambda m: (int(m.group(1)), current_year)),
+        ]
+
+        # Словесные кварталы
+        quarter_words = {
+            'первый': 1, 'первого': 1, 'первом': 1,
+            'второй': 2, 'второго': 2, 'втором': 2,
+            'третий': 3, 'третьего': 3, 'третьем': 3,
+            'четвертый': 4, 'четвертого': 4, 'четвертом': 4,
+        }
+
+        for word, q_num in quarter_words.items():
+            if word in question_lower and 'квартал' in question_lower:
+                # Ищем год рядом
+                year_match = re.search(r'(\d{4})', question_lower)
+                year = int(year_match.group(1)) if year_match else current_year
+                return self._quarter_to_range(q_num, year)
+
+        for pattern, extractor in quarter_patterns:
+            match = re.search(pattern, question_lower)
+            if match:
+                q_num, year = extractor(match)
+                return self._quarter_to_range(q_num, year)
+
+        # "прошлый квартал", "предыдущий квартал"
+        if re.search(r'прошл\w*\s+квартал|предыдущ\w*\s+квартал', question_lower):
+            # Вычисляем предыдущий квартал
+            current_quarter = (now.month - 1) // 3 + 1
+            if current_quarter == 1:
+                return self._quarter_to_range(4, current_year - 1)
+            else:
+                return self._quarter_to_range(current_quarter - 1, current_year)
+
+        # Год: "2025 год", "за 2025", "в 2025"
+        year_match = re.search(r'(?:за|в|на)\s*(\d{4})\s*(?:год|г\.?)?', question_lower)
+        if year_match:
+            year = int(year_match.group(1))
+            return DateRange(
+                start=datetime(year, 1, 1),
+                end=datetime(year, 12, 31, 23, 59, 59),
+                description=f"{year} год"
+            )
+
+        # "прошлый год", "предыдущий год"
+        if re.search(r'прошл\w*\s+год|предыдущ\w*\s+год', question_lower):
+            year = current_year - 1
+            return DateRange(
+                start=datetime(year, 1, 1),
+                end=datetime(year, 12, 31, 23, 59, 59),
+                description=f"{year} год"
+            )
+
+        # Месяцы
+        months_ru = {
+            'январ': 1, 'феврал': 2, 'март': 3, 'апрел': 4,
+            'ма': 5, 'июн': 6, 'июл': 7, 'август': 8,
+            'сентябр': 9, 'октябр': 10, 'ноябр': 11, 'декабр': 12
+        }
+
+        for month_prefix, month_num in months_ru.items():
+            if month_prefix in question_lower:
+                year_match = re.search(r'(\d{4})', question_lower)
+                year = int(year_match.group(1)) if year_match else current_year
+
+                # Последний день месяца
+                if month_num == 12:
+                    end_date = datetime(year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    end_date = datetime(year, month_num + 1, 1) - timedelta(days=1)
+
+                return DateRange(
+                    start=datetime(year, month_num, 1),
+                    end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
+                    description=f"{month_prefix}* {year}"
+                )
+
+        # "прошлый месяц"
+        if re.search(r'прошл\w*\s+месяц|предыдущ\w*\s+месяц', question_lower):
+            first_of_this_month = datetime(now.year, now.month, 1)
+            last_of_prev_month = first_of_this_month - timedelta(days=1)
+            first_of_prev_month = datetime(last_of_prev_month.year, last_of_prev_month.month, 1)
+            return DateRange(
+                start=first_of_prev_month,
+                end=datetime(last_of_prev_month.year, last_of_prev_month.month, last_of_prev_month.day, 23, 59, 59),
+                description="прошлый месяц"
+            )
+
+        # "последние N месяцев/недель"
+        last_n_match = re.search(r'последни[ех]\s+(\d+)\s*(месяц|недел|дн)', question_lower)
+        if last_n_match:
+            n = int(last_n_match.group(1))
+            unit = last_n_match.group(2)
+            if 'месяц' in unit:
+                start = now - timedelta(days=n * 30)
+            elif 'недел' in unit:
+                start = now - timedelta(weeks=n)
+            else:  # дней
+                start = now - timedelta(days=n)
+            return DateRange(
+                start=start,
+                end=now,
+                description=f"последние {n} {unit}*"
+            )
+
+        return None
+
+    def _quarter_to_range(self, quarter: int, year: int) -> DateRange:
+        """Преобразовать квартал в DateRange"""
+        quarter_starts = {1: 1, 2: 4, 3: 7, 4: 10}
+        quarter_ends = {1: 3, 2: 6, 3: 9, 4: 12}
+
+        start_month = quarter_starts[quarter]
+        end_month = quarter_ends[quarter]
+
+        # Последний день квартала
+        if end_month == 12:
+            end_date = datetime(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            end_date = datetime(year, end_month + 1, 1) - timedelta(days=1)
+
+        return DateRange(
+            start=datetime(year, start_month, 1),
+            end=datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59),
+            description=f"Q{quarter} {year}"
+        )
+
     async def search_similar_diversified(
         self,
         query: str,
@@ -89,6 +241,7 @@ class RAGService:
         min_similarity: float = 0.15,
         client_id: UUID | None = None,
         title_filter: str | None = None,
+        date_range: DateRange | None = None,
     ) -> list[SearchResult]:
         """
         Diversified поиск: возвращает чанки из РАЗНЫХ встреч.
@@ -115,6 +268,11 @@ class RAGService:
         if title_filter:
             conditions.append("LOWER(m.title) LIKE :title_filter")
             params["title_filter"] = f"%{title_filter.lower()}%"
+
+        if date_range:
+            conditions.append("m.date >= :date_start AND m.date <= :date_end")
+            params["date_start"] = date_range.start
+            params["date_end"] = date_range.end
 
         where_clause = ""
         if conditions:
@@ -257,9 +415,14 @@ class RAGService:
         if title_filter:
             logger.info(f"Auto-detected client filter: {title_filter}")
 
+        # Автоматическое определение временного диапазона
+        date_range = self._parse_date_range(question)
+        if date_range:
+            logger.info(f"Auto-detected date range: {date_range.description} ({date_range.start} - {date_range.end})")
+
         # Выбор стратегии поиска
-        if title_filter or client_id:
-            # Клиентский вопрос: 2 чанка/встречу, до 30 чанков — покрываем все встречи
+        if title_filter or client_id or date_range:
+            # Специфичный вопрос: 2 чанка/встречу, до 30 чанков — покрываем все встречи
             sources = await self.search_similar_diversified(
                 query=question,
                 max_chunks_per_meeting=2,
@@ -267,10 +430,22 @@ class RAGService:
                 min_similarity=0.15,
                 client_id=client_id,
                 title_filter=title_filter,
+                date_range=date_range,
             )
-            # Fallback: если с фильтром слишком мало
+            # Fallback: если с фильтрами слишком мало — убираем date_range
+            if len(sources) < 3 and date_range:
+                logger.info(f"Too few results with date filter, searching without date range")
+                sources = await self.search_similar_diversified(
+                    query=question,
+                    max_chunks_per_meeting=2,
+                    max_total_chunks=30,
+                    min_similarity=0.15,
+                    client_id=client_id,
+                    title_filter=title_filter,
+                )
+            # Fallback 2: если всё ещё мало — убираем client filter
             if len(sources) < 3 and title_filter:
-                logger.info(f"Too few results with filter '{title_filter}', searching without filter")
+                logger.info(f"Too few results with client filter '{title_filter}', searching without filter")
                 sources = await self.search_similar_diversified(
                     query=question,
                     max_chunks_per_meeting=1,
@@ -297,10 +472,12 @@ class RAGService:
         # Формируем контекст с группировкой по встречам
         context = self._format_context(sources)
 
-        # Дополнительный контекст о клиенте для промпта
+        # Дополнительный контекст для промпта
         filter_note = ""
         if title_filter:
-            filter_note = f"\nВажно: пользователь спрашивает конкретно про клиента/компанию «{title_filter}». Фокусируйся ТОЛЬКО на информации об этом клиенте."
+            filter_note += f"\nВажно: пользователь спрашивает конкретно про клиента/компанию «{title_filter}». Фокусируйся ТОЛЬКО на информации об этом клиенте."
+        if date_range:
+            filter_note += f"\nПользователь спрашивает про период: {date_range.description}. Учитывай только информацию за этот период."
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", """Ты — ассистент бизнес-консультанта. Отвечай на вопросы строго на основе предоставленных транскриптов встреч.
