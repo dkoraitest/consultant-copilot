@@ -25,15 +25,24 @@ class AskRequest(BaseModel):
     num_chunks: int = 12
 
 
-class SourceInfo(BaseModel):
+class MeetingSourceInfo(BaseModel):
     meeting_title: str
     meeting_date: str | None
     similarity: float
 
 
+class TelegramSourceInfo(BaseModel):
+    chat_title: str
+    client_name: str | None
+    message_date: str | None
+    sender_name: str | None
+    similarity: float
+
+
 class AskResponse(BaseModel):
     answer: str
-    sources: list[SourceInfo]
+    meeting_sources: list[MeetingSourceInfo]
+    telegram_sources: list[TelegramSourceInfo]
 
 
 class IndexRequest(BaseModel):
@@ -59,14 +68,17 @@ async def ask_question(
     session: AsyncSession = Depends(get_session),
 ):
     """
-    Задать вопрос по истории встреч.
+    Задать вопрос по истории встреч и переписке в Telegram.
 
-    Использует RAG для поиска релевантных фрагментов транскриптов
-    и генерации ответа с помощью Claude.
+    Использует RAG для поиска релевантных фрагментов из:
+    - Транскриптов встреч
+    - Сообщений Telegram чатов
+
+    Генерирует ответ с помощью Claude на основе найденного контекста.
     """
     try:
         rag = RAGService(session)
-        answer, sources = await rag.ask(
+        answer, meeting_sources, telegram_sources = await rag.ask(
             question=request.question,
             client_id=request.client_id,
             num_chunks=request.num_chunks,
@@ -74,13 +86,23 @@ async def ask_question(
 
         return AskResponse(
             answer=answer,
-            sources=[
-                SourceInfo(
+            meeting_sources=[
+                MeetingSourceInfo(
                     meeting_title=s.meeting_title,
                     meeting_date=s.meeting_date,
                     similarity=round(s.similarity, 3),
                 )
-                for s in sources
+                for s in meeting_sources
+            ],
+            telegram_sources=[
+                TelegramSourceInfo(
+                    chat_title=s.chat_title,
+                    client_name=s.client_name,
+                    message_date=s.message_date,
+                    sender_name=s.sender_name,
+                    similarity=round(s.similarity, 3),
+                )
+                for s in telegram_sources
             ]
         )
     except Exception as e:

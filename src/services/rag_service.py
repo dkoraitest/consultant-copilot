@@ -14,7 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database.models import Embedding, Meeting
+from src.database.models import Embedding, Meeting, TelegramEmbedding, TelegramMessage, TelegramChat
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,26 @@ class DateRange:
 
 @dataclass
 class SearchResult:
-    """Результат поиска"""
+    """Результат поиска по встречам"""
     chunk_text: str
     meeting_id: UUID
     meeting_title: str
     meeting_date: str | None
     similarity: float
+    source_type: str = "meeting"  # "meeting" или "telegram"
+
+
+@dataclass
+class TelegramSearchResult:
+    """Результат поиска по Telegram"""
+    chunk_text: str
+    message_id: UUID
+    chat_title: str
+    client_name: str | None
+    message_date: str | None
+    sender_name: str | None
+    similarity: float
+    source_type: str = "telegram"
 
 
 class RAGService:
@@ -342,6 +356,170 @@ class RAGService:
 
         return "\n\n---\n\n".join(parts)
 
+    def _format_telegram_context(self, sources: list[TelegramSearchResult]) -> str:
+        """
+        Форматирование результатов из Telegram с группировкой по чатам.
+        """
+        chats_chunks: OrderedDict[str, list[TelegramSearchResult]] = OrderedDict()
+        for source in sources:
+            chat_key = source.chat_title
+            if chat_key not in chats_chunks:
+                chats_chunks[chat_key] = []
+            chats_chunks[chat_key].append(source)
+
+        parts = []
+        for i, (chat_title, chunks) in enumerate(chats_chunks.items(), 1):
+            client = chunks[0].client_name or "Неизвестный клиент"
+            header = f"[Telegram чат {i}: {chat_title} (клиент: {client})]"
+
+            chunk_parts = []
+            for c in chunks:
+                date_str = c.message_date[:10] if c.message_date else "?"
+                sender = c.sender_name or "Неизвестный"
+                chunk_parts.append(f"[{date_str}, {sender}]: {c.chunk_text}")
+
+            parts.append(f"{header}\n" + "\n\n".join(chunk_parts))
+
+        return "\n\n---\n\n".join(parts)
+
+    def _format_combined_context(
+        self,
+        meeting_sources: list[SearchResult],
+        telegram_sources: list[TelegramSearchResult]
+    ) -> str:
+        """
+        Объединить контекст из встреч и Telegram в единый формат.
+        """
+        parts = []
+
+        if meeting_sources:
+            parts.append("=== ТРАНСКРИПТЫ ВСТРЕЧ ===\n\n" + self._format_context(meeting_sources))
+
+        if telegram_sources:
+            parts.append("=== ПЕРЕПИСКА В TELEGRAM ===\n\n" + self._format_telegram_context(telegram_sources))
+
+        return "\n\n" + "="*50 + "\n\n".join(parts) if parts else ""
+
+    async def _find_telegram_client_filter(self, question: str) -> str | None:
+        """
+        Попытаться найти имя клиента в вопросе,
+        сопоставив с client_name в telegram_chats.
+        """
+        result = await self.session.execute(
+            text("SELECT DISTINCT client_name FROM telegram_chats WHERE client_name IS NOT NULL")
+        )
+        client_names = [row[0] for row in result.fetchall()]
+
+        question_lower = question.lower()
+
+        best_match = None
+        best_match_len = 0
+        for client_name in client_names:
+            name_lower = client_name.lower()
+            if name_lower in question_lower:
+                if len(name_lower) > best_match_len:
+                    best_match = client_name
+                    best_match_len = len(name_lower)
+            else:
+                # Проверяем значимые слова (>3 символов)
+                for word in name_lower.split():
+                    if len(word) > 3 and word in question_lower:
+                        if len(word) > best_match_len:
+                            best_match = client_name
+                            best_match_len = len(word)
+
+        return best_match
+
+    async def search_telegram_diversified(
+        self,
+        query: str,
+        max_chunks_per_chat: int = 3,
+        max_total_chunks: int = 20,
+        min_similarity: float = 0.15,
+        client_name: str | None = None,
+        date_range: DateRange | None = None,
+    ) -> list[TelegramSearchResult]:
+        """
+        Diversified поиск по Telegram сообщениям.
+
+        Ограничивает количество результатов от одного чата,
+        обеспечивая покрытие разных чатов/клиентов.
+        """
+        query_embedding = self.embeddings.embed_query(query)
+        vector_str = "[" + ",".join(map(str, query_embedding)) + "]"
+
+        # WHERE условия
+        conditions = []
+        params = {
+            "max_chunks_per_chat": max_chunks_per_chat,
+            "max_total_chunks": max_total_chunks,
+            "min_similarity": min_similarity,
+        }
+
+        if client_name:
+            conditions.append("tc.client_name = :client_name")
+            params["client_name"] = client_name
+
+        if date_range:
+            conditions.append("tm.date >= :date_start AND tm.date <= :date_end")
+            params["date_start"] = date_range.start
+            params["date_end"] = date_range.end
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        sql = f"""
+            WITH ranked_chunks AS (
+                SELECT
+                    te.chunk_text,
+                    te.message_id,
+                    tc.title AS chat_title,
+                    tc.client_name,
+                    tm.date AS message_date,
+                    tm.sender_name,
+                    tm.chat_id,
+                    1 - (te.embedding <=> '{vector_str}'::vector) AS similarity,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY tm.chat_id
+                        ORDER BY te.embedding <=> '{vector_str}'::vector
+                    ) AS chunk_rank
+                FROM telegram_embeddings te
+                JOIN telegram_messages tm ON te.message_id = tm.id
+                JOIN telegram_chats tc ON tm.chat_id = tc.id
+                {where_clause}
+            )
+            SELECT
+                chunk_text,
+                message_id,
+                chat_title,
+                client_name,
+                message_date,
+                sender_name,
+                similarity
+            FROM ranked_chunks
+            WHERE chunk_rank <= :max_chunks_per_chat
+              AND similarity > :min_similarity
+            ORDER BY similarity DESC
+            LIMIT :max_total_chunks
+        """
+
+        result = await self.session.execute(text(sql), params)
+        rows = result.fetchall()
+
+        return [
+            TelegramSearchResult(
+                chunk_text=row.chunk_text,
+                message_id=row.message_id,
+                chat_title=row.chat_title,
+                client_name=row.client_name,
+                message_date=str(row.message_date) if row.message_date else None,
+                sender_name=row.sender_name,
+                similarity=float(row.similarity),
+            )
+            for row in rows
+        ]
+
     async def search_similar(
         self,
         query: str,
@@ -404,98 +582,143 @@ class RAGService:
         self,
         question: str,
         client_id: UUID | None = None,
-        num_chunks: int = 12
-    ) -> tuple[str, list[SearchResult]]:
+        num_chunks: int = 12,
+        search_telegram: bool = True,
+    ) -> tuple[str, list[SearchResult], list[TelegramSearchResult]]:
         """
-        Ответить на вопрос по истории встреч.
-        Использует diversified retrieval для покрытия всех встреч.
+        Ответить на вопрос по истории встреч И переписке в Telegram.
+        Использует diversified retrieval для покрытия всех источников.
+
+        Returns:
+            tuple: (ответ, результаты из встреч, результаты из Telegram)
         """
-        # Автоматическое определение клиента из вопроса
+        # Автоматическое определение клиента из вопроса (по встречам)
         title_filter = await self._find_client_filter(question)
         if title_filter:
-            logger.info(f"Auto-detected client filter: {title_filter}")
+            logger.info(f"Auto-detected meeting client filter: {title_filter}")
+
+        # Автоматическое определение клиента из Telegram чатов
+        telegram_client_filter = await self._find_telegram_client_filter(question)
+        if telegram_client_filter:
+            logger.info(f"Auto-detected telegram client filter: {telegram_client_filter}")
 
         # Автоматическое определение временного диапазона
         date_range = self._parse_date_range(question)
         if date_range:
             logger.info(f"Auto-detected date range: {date_range.description} ({date_range.start} - {date_range.end})")
 
-        # Выбор стратегии поиска
+        # === ПОИСК ПО ВСТРЕЧАМ ===
         if title_filter or client_id or date_range:
-            # Специфичный вопрос: 2 чанка/встречу, до 30 чанков — покрываем все встречи
-            sources = await self.search_similar_diversified(
+            meeting_sources = await self.search_similar_diversified(
                 query=question,
                 max_chunks_per_meeting=2,
-                max_total_chunks=30,
+                max_total_chunks=20,
                 min_similarity=0.15,
                 client_id=client_id,
                 title_filter=title_filter,
                 date_range=date_range,
             )
-            # Fallback: если с фильтрами слишком мало — убираем date_range
-            if len(sources) < 3 and date_range:
-                logger.info(f"Too few results with date filter, searching without date range")
-                sources = await self.search_similar_diversified(
+            # Fallback: убираем date_range
+            if len(meeting_sources) < 3 and date_range:
+                logger.info("Too few meeting results with date filter, searching without date range")
+                meeting_sources = await self.search_similar_diversified(
                     query=question,
                     max_chunks_per_meeting=2,
-                    max_total_chunks=30,
+                    max_total_chunks=20,
                     min_similarity=0.15,
                     client_id=client_id,
                     title_filter=title_filter,
                 )
-            # Fallback 2: если всё ещё мало — убираем client filter
-            if len(sources) < 3 and title_filter:
-                logger.info(f"Too few results with client filter '{title_filter}', searching without filter")
-                sources = await self.search_similar_diversified(
+            # Fallback 2: убираем client filter
+            if len(meeting_sources) < 3 and title_filter:
+                logger.info(f"Too few meeting results with client filter '{title_filter}', searching without filter")
+                meeting_sources = await self.search_similar_diversified(
                     query=question,
                     max_chunks_per_meeting=1,
-                    max_total_chunks=20,
+                    max_total_chunks=15,
                     min_similarity=0.20,
                     client_id=client_id,
                 )
         else:
-            # Общий вопрос: 1 чанк/встречу, до 20 чанков
-            sources = await self.search_similar_diversified(
+            meeting_sources = await self.search_similar_diversified(
                 query=question,
                 max_chunks_per_meeting=1,
-                max_total_chunks=20,
+                max_total_chunks=15,
                 min_similarity=0.20,
             )
 
-        if not sources:
-            return "К сожалению, я не нашёл релевантной информации по вашему вопросу.", []
+        # === ПОИСК ПО TELEGRAM ===
+        telegram_sources: list[TelegramSearchResult] = []
+        if search_telegram:
+            if telegram_client_filter or date_range:
+                telegram_sources = await self.search_telegram_diversified(
+                    query=question,
+                    max_chunks_per_chat=3,
+                    max_total_chunks=15,
+                    min_similarity=0.15,
+                    client_name=telegram_client_filter,
+                    date_range=date_range,
+                )
+                # Fallback: убираем date_range
+                if len(telegram_sources) < 2 and date_range:
+                    logger.info("Too few telegram results with date filter, searching without date range")
+                    telegram_sources = await self.search_telegram_diversified(
+                        query=question,
+                        max_chunks_per_chat=3,
+                        max_total_chunks=15,
+                        min_similarity=0.15,
+                        client_name=telegram_client_filter,
+                    )
+            else:
+                telegram_sources = await self.search_telegram_diversified(
+                    query=question,
+                    max_chunks_per_chat=2,
+                    max_total_chunks=10,
+                    min_similarity=0.20,
+                )
 
-        # Логируем покрытие встреч
-        meeting_ids = set(s.meeting_id for s in sources)
-        logger.info(f"Diversified search: {len(sources)} chunks from {len(meeting_ids)} meetings")
+        # Если вообще ничего не нашли
+        if not meeting_sources and not telegram_sources:
+            return "К сожалению, я не нашёл релевантной информации по вашему вопросу.", [], []
 
-        # Формируем контекст с группировкой по встречам
-        context = self._format_context(sources)
+        # Логируем покрытие
+        if meeting_sources:
+            meeting_ids = set(s.meeting_id for s in meeting_sources)
+            logger.info(f"Meeting search: {len(meeting_sources)} chunks from {len(meeting_ids)} meetings")
+        if telegram_sources:
+            chat_titles = set(s.chat_title for s in telegram_sources)
+            logger.info(f"Telegram search: {len(telegram_sources)} messages from {len(chat_titles)} chats")
+
+        # Формируем объединённый контекст
+        context = self._format_combined_context(meeting_sources, telegram_sources)
 
         # Дополнительный контекст для промпта
         filter_note = ""
-        if title_filter:
-            filter_note += f"\nВажно: пользователь спрашивает конкретно про клиента/компанию «{title_filter}». Фокусируйся ТОЛЬКО на информации об этом клиенте."
+        client_name = title_filter or telegram_client_filter
+        if client_name:
+            filter_note += f"\nВажно: пользователь спрашивает конкретно про клиента/компанию «{client_name}». Фокусируйся ТОЛЬКО на информации об этом клиенте."
         if date_range:
             filter_note += f"\nПользователь спрашивает про период: {date_range.description}. Учитывай только информацию за этот период."
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Ты — ассистент бизнес-консультанта. Отвечай на вопросы строго на основе предоставленных транскриптов встреч.
+            ("system", """Ты — ассистент бизнес-консультанта. Отвечай на вопросы строго на основе предоставленных данных:
+- Транскрипты встреч (записи разговоров)
+- Переписка в Telegram (рабочие чаты с клиентами)
 {filter_note}
 
 ПРАВИЛА ОТВЕТА:
-1. Давай КОНКРЕТНЫЕ ответы с деталями из транскриптов:
+1. Давай КОНКРЕТНЫЕ ответы с деталями из источников:
    - Цитируй ключевые фразы участников (в кавычках)
-   - Указывай даты встреч
+   - Указывай даты встреч и сообщений
    - Перечисляй конкретные решения, договорённости, цифры, метрики
-   - Называй имена участников, если они упоминаются в контексте
+   - Называй имена участников, если они упоминаются
 2. Структурируй ответ: используй нумерованные списки для перечислений
-3. Для каждого тезиса указывай источник — название встречи и дату
+3. Для каждого тезиса указывай источник — встреча (название и дата) или Telegram-чат
 4. Если информации недостаточно для полного ответа — честно скажи, чего не хватает
 5. НЕ придумывай и НЕ додумывай информацию, которой нет в контексте
 6. Отвечай на русском языке
-7. Старайся упомянуть информацию из ВСЕХ предоставленных встреч, не ограничивайся 1-2 источниками"""),
-            ("human", """Контекст из транскриптов встреч:
+7. Используй информацию из ВСЕХ предоставленных источников, не ограничивайся 1-2"""),
+            ("human", """Контекст из источников:
 
 {context}
 
@@ -503,7 +726,7 @@ class RAGService:
 
 Вопрос: {question}
 
-Дай подробный ответ с конкретными деталями из транскриптов:""")
+Дай подробный ответ с конкретными деталями:""")
         ])
 
         chain = prompt | self.llm
@@ -513,7 +736,7 @@ class RAGService:
             "filter_note": filter_note
         })
 
-        return response.content, sources
+        return response.content, meeting_sources, telegram_sources
 
     async def get_meeting_context(
         self,

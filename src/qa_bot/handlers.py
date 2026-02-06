@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 WELCOME_MESSAGE = """👋 Привет! Я Q&A бот Consultant Copilot.
 
-Задайте вопрос по истории встреч, и я найду ответ в транскриптах.
+Задайте вопрос, и я найду ответ в транскриптах встреч и переписке в Telegram.
 
 *Примеры вопросов:*
 • Какие гипотезы обсуждались с клиентом X?
 • Что решили по продукту на прошлой неделе?
 • Какие метрики упоминались?
 • О чём говорили на встрече с Y?
+• Что обсуждали в чате с CloudBuying?
 
 Просто напишите свой вопрос 👇"""
 
@@ -85,25 +86,35 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Показываем, что бот думает
-    thinking_msg = await update.message.reply_text("🔍 Ищу ответ в транскриптах...")
+    thinking_msg = await update.message.reply_text("🔍 Ищу ответ в транскриптах и Telegram...")
 
     try:
         async with async_session_maker() as session:
             rag = RAGService(session)
-            answer, sources = await rag.ask(question)
+            answer, meeting_sources, telegram_sources = await rag.ask(question)
 
         # Формируем ответ
         response = answer
 
-        # Добавляем источники (все уникальные встречи)
-        if sources:
-            response += "\n\n📚 Источники:"
+        # Добавляем источники из встреч
+        if meeting_sources:
+            response += "\n\n📚 Встречи:"
             seen_titles = set()
-            for s in sources:
+            for s in meeting_sources:
                 if s.meeting_title not in seen_titles:
                     seen_titles.add(s.meeting_title)
                     date_str = f" ({s.meeting_date[:10]})" if s.meeting_date else ""
                     response += f"\n• {s.meeting_title}{date_str}"
+
+        # Добавляем источники из Telegram
+        if telegram_sources:
+            response += "\n\n💬 Telegram:"
+            seen_chats = set()
+            for s in telegram_sources:
+                if s.chat_title not in seen_chats:
+                    seen_chats.add(s.chat_title)
+                    client = f" ({s.client_name})" if s.client_name else ""
+                    response += f"\n• {s.chat_title}{client}"
 
         # Удаляем сообщение "Ищу ответ..."
         try:
