@@ -111,8 +111,9 @@ async def dry_run_import(settings):
 
 async def run_import(settings, limit: int | None = None):
     """Выполнить импорт сообщений"""
-    # Создаём подключение к БД
-    engine = create_async_engine(settings.database_url, echo=False)
+    # Создаём подключение к БД (asyncpg драйвер)
+    db_url = settings.database_url.replace("postgresql://", "postgresql+asyncpg://")
+    engine = create_async_engine(db_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as session:
