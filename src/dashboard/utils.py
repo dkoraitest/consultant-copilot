@@ -1,0 +1,177 @@
+"""
+Утилиты для Streamlit Dashboard
+"""
+import asyncio
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.database.connection import async_session_maker
+from src.database.models import Settings, TelegramChat, Meeting, Embedding, TelegramEmbedding
+
+
+def run_async(coro):
+    """Запустить асинхронную функцию в синхронном контексте Streamlit"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+# ============================================================================
+# Settings
+# ============================================================================
+
+DEFAULT_SETTINGS = {
+    "system_prompt": """Ты — ассистент бизнес-консультанта. Отвечай на вопросы строго на основе предоставленных данных:
+- Транскрипты встреч (записи разговоров)
+- Переписка в Telegram (рабочие чаты с клиентами)
+
+ПРАВИЛА ОТВЕТА:
+1. Давай КОНКРЕТНЫЕ ответы с деталями из источников
+2. Цитируй ключевые фразы участников (в кавычках)
+3. Указывай даты встреч и сообщений
+4. Структурируй ответ: используй нумерованные списки
+5. НЕ придумывай информацию, которой нет в контексте
+6. Отвечай на русском языке""",
+    "min_similarity": "0.15",
+    "max_chunks_per_meeting": "2",
+    "max_total_chunks": "20",
+}
+
+
+async def get_setting(key: str) -> str | None:
+    """Получить настройку из БД"""
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Settings.value).where(Settings.key == key)
+        )
+        row = result.scalar_one_or_none()
+        return row if row else DEFAULT_SETTINGS.get(key)
+
+
+async def set_setting(key: str, value: str, description: str | None = None):
+    """Сохранить настройку в БД"""
+    async with async_session_maker() as session:
+        # Upsert
+        existing = await session.execute(
+            select(Settings).where(Settings.key == key)
+        )
+        setting = existing.scalar_one_or_none()
+
+        if setting:
+            setting.value = value
+            setting.updated_at = datetime.utcnow()
+            if description:
+                setting.description = description
+        else:
+            setting = Settings(key=key, value=value, description=description)
+            session.add(setting)
+
+        await session.commit()
+
+
+async def get_all_settings() -> dict[str, str]:
+    """Получить все настройки"""
+    async with async_session_maker() as session:
+        result = await session.execute(select(Settings))
+        settings = {s.key: s.value for s in result.scalars().all()}
+
+    # Добавляем дефолты для отсутствующих
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in settings:
+            settings[key] = default
+
+    return settings
+
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+async def get_stats() -> dict[str, Any]:
+    """Получить статистику по индексу"""
+    async with async_session_maker() as session:
+        # Встречи
+        meetings_result = await session.execute(
+            text("SELECT COUNT(*) FROM meetings")
+        )
+        meetings_count = meetings_result.scalar()
+
+        # Встречи с транскриптами
+        transcripts_result = await session.execute(
+            text("SELECT COUNT(*) FROM meetings WHERE transcript IS NOT NULL AND transcript != ''")
+        )
+        transcripts_count = transcripts_result.scalar()
+
+        # Эмбеддинги встреч
+        embeddings_result = await session.execute(
+            text("SELECT COUNT(*) FROM embeddings")
+        )
+        embeddings_count = embeddings_result.scalar()
+
+        # Telegram чаты
+        chats_result = await session.execute(
+            text("SELECT COUNT(*) FROM telegram_chats WHERE is_active = true")
+        )
+        chats_count = chats_result.scalar()
+
+        # Telegram сообщения
+        messages_result = await session.execute(
+            text("SELECT COUNT(*) FROM telegram_messages")
+        )
+        messages_count = messages_result.scalar()
+
+        # Telegram эмбеддинги
+        tg_embeddings_result = await session.execute(
+            text("SELECT COUNT(*) FROM telegram_embeddings")
+        )
+        tg_embeddings_count = tg_embeddings_result.scalar()
+
+        return {
+            "meetings_total": meetings_count,
+            "meetings_with_transcripts": transcripts_count,
+            "meeting_embeddings": embeddings_count,
+            "telegram_chats": chats_count,
+            "telegram_messages": messages_count,
+            "telegram_embeddings": tg_embeddings_count,
+        }
+
+
+# ============================================================================
+# Telegram Chats
+# ============================================================================
+
+async def get_telegram_chats() -> list[dict]:
+    """Получить список Telegram чатов"""
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(TelegramChat).order_by(TelegramChat.title)
+        )
+        chats = result.scalars().all()
+        return [
+            {
+                "id": c.id,
+                "title": c.title,
+                "client_name": c.client_name,
+                "is_active": c.is_active,
+                "last_synced": c.last_synced_message_id,
+            }
+            for c in chats
+        ]
+
+
+async def toggle_chat_active(chat_id: int, is_active: bool):
+    """Активировать/деактивировать чат"""
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(TelegramChat).where(TelegramChat.id == chat_id)
+        )
+        chat = result.scalar_one_or_none()
+        if chat:
+            chat.is_active = is_active
+            await session.commit()

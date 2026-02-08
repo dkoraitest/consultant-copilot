@@ -182,3 +182,17 @@ class TelegramEmbedding(Base):
 
     # Relationships
     message: Mapped["TelegramMessage"] = relationship(back_populates="embeddings")
+
+
+# ============================================================================
+# Application Settings
+# ============================================================================
+
+class Settings(Base):
+    """Настройки приложения (хранятся в БД)"""
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(String(500))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
