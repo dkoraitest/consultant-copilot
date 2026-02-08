@@ -96,25 +96,39 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Формируем ответ
         response = answer
 
-        # Добавляем источники из встреч
+        # Добавляем источники из встреч (максимум 5)
         if meeting_sources:
-            response += "\n\n📚 Встречи:"
-            seen_titles = set()
+            seen_titles = []
             for s in meeting_sources:
                 if s.meeting_title not in seen_titles:
-                    seen_titles.add(s.meeting_title)
-                    date_str = f" ({s.meeting_date[:10]})" if s.meeting_date else ""
-                    response += f"\n• {s.meeting_title}{date_str}"
+                    seen_titles.append(s.meeting_title)
+                    if len(seen_titles) >= 5:
+                        break
 
-        # Добавляем источники из Telegram
+            if seen_titles:
+                response += "\n\n📚 Источники:"
+                for title in seen_titles:
+                    # Найдём дату для этой встречи
+                    date_str = ""
+                    for s in meeting_sources:
+                        if s.meeting_title == title and s.meeting_date:
+                            date_str = f" ({s.meeting_date[:10]})"
+                            break
+                    response += f"\n• {title}{date_str}"
+
+        # Добавляем источники из Telegram только если они есть (максимум 3)
         if telegram_sources:
-            response += "\n\n💬 Telegram:"
-            seen_chats = set()
+            seen_chats = []
             for s in telegram_sources:
                 if s.chat_title not in seen_chats:
-                    seen_chats.add(s.chat_title)
-                    client = f" ({s.client_name})" if s.client_name else ""
-                    response += f"\n• {s.chat_title}{client}"
+                    seen_chats.append(s.chat_title)
+                    if len(seen_chats) >= 3:
+                        break
+
+            if seen_chats:
+                response += "\n\n💬 Чаты:"
+                for chat_title in seen_chats:
+                    response += f"\n• {chat_title}"
 
         # Удаляем сообщение "Ищу ответ..."
         try:

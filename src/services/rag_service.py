@@ -403,26 +403,38 @@ class RAGService:
     async def _find_telegram_client_filter(self, question: str) -> str | None:
         """
         Попытаться найти имя клиента в вопросе,
-        сопоставив с client_name в telegram_chats.
+        сопоставив с client_name или title в telegram_chats.
         """
         result = await self.session.execute(
-            text("SELECT DISTINCT client_name FROM telegram_chats WHERE client_name IS NOT NULL")
+            text("SELECT DISTINCT client_name, title FROM telegram_chats WHERE client_name IS NOT NULL")
         )
-        client_names = [row[0] for row in result.fetchall()]
+        rows = result.fetchall()
 
         question_lower = question.lower()
 
         best_match = None
         best_match_len = 0
-        for client_name in client_names:
+
+        for row in rows:
+            client_name, title = row
+
+            # Проверяем client_name
             name_lower = client_name.lower()
             if name_lower in question_lower:
                 if len(name_lower) > best_match_len:
                     best_match = client_name
                     best_match_len = len(name_lower)
             else:
-                # Проверяем значимые слова (>3 символов)
                 for word in name_lower.split():
+                    if len(word) > 3 and word in question_lower:
+                        if len(word) > best_match_len:
+                            best_match = client_name
+                            best_match_len = len(word)
+
+            # Также проверяем title чата
+            if title:
+                title_lower = title.lower()
+                for word in title_lower.split():
                     if len(word) > 3 and word in question_lower:
                         if len(word) > best_match_len:
                             best_match = client_name
@@ -649,7 +661,15 @@ class RAGService:
 
         # === ПОИСК ПО TELEGRAM ===
         telegram_sources: list[TelegramSearchResult] = []
-        if search_telegram:
+
+        # Если клиент найден во встречах, но НЕ найден в Telegram — не искать в Telegram
+        # Это предотвращает появление нерелевантных чатов
+        should_search_telegram = search_telegram
+        if title_filter and not telegram_client_filter:
+            logger.info(f"Client '{title_filter}' found in meetings but not in Telegram - skipping Telegram search")
+            should_search_telegram = False
+
+        if should_search_telegram:
             if telegram_client_filter or date_range:
                 telegram_sources = await self.search_telegram_diversified(
                     query=question,
@@ -670,6 +690,7 @@ class RAGService:
                         client_name=telegram_client_filter,
                     )
             else:
+                # Общий вопрос без фильтра по клиенту — ищем в Telegram
                 telegram_sources = await self.search_telegram_diversified(
                     query=question,
                     max_chunks_per_chat=2,
