@@ -41,6 +41,7 @@ notion-client==2.2.1
 
 # Dashboard
 streamlit==1.32.0
+nest-asyncio==1.6.0
 
 # Utils
 aiofiles==23.2.1

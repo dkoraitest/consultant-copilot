@@ -2,6 +2,7 @@
 Утилиты для Streamlit Dashboard
 """
 import asyncio
+import nest_asyncio
 from datetime import datetime
 from typing import Any
 
@@ -11,11 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database.connection import async_session_maker
 from src.database.models import Settings, TelegramChat, TelegramMessage, Meeting, Embedding, TelegramEmbedding, Client
 
+# Разрешаем вложенные event loops для Streamlit
+nest_asyncio.apply()
+
 
 def run_async(coro):
     """Запустить асинхронную функцию в синхронном контексте Streamlit"""
-    # Используем asyncio.run для правильной очистки ресурсов
-    return asyncio.run(coro)
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(coro)
 
 
 # ============================================================================
