@@ -14,12 +14,8 @@ from src.database.models import Settings, TelegramChat, TelegramMessage, Meeting
 
 def run_async(coro):
     """Запустить асинхронную функцию в синхронном контексте Streamlit"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    # Используем asyncio.run для правильной очистки ресурсов
+    return asyncio.run(coro)
 
 
 # ============================================================================
