@@ -12,6 +12,9 @@ from src.dashboard.utils import (
     update_chat_client,
     create_telegram_chat,
     toggle_chat_active,
+    get_unlinked_meetings,
+    link_meeting_to_client,
+    bulk_link_meetings_by_pattern,
 )
 
 st.set_page_config(page_title="Clients - Consultant Copilot", page_icon="👥", layout="wide")
@@ -22,7 +25,7 @@ st.title("👥 Клиенты и Telegram чаты")
 # Вкладки
 # ============================================================================
 
-tab1, tab2, tab3 = st.tabs(["📋 Клиенты", "📱 Telegram чаты", "➕ Добавить чат"])
+tab1, tab2, tab3, tab4 = st.tabs(["📋 Клиенты", "📱 Telegram чаты", "🔗 Не связанные", "➕ Добавить чат"])
 
 # ============================================================================
 # Tab 1: Клиенты
@@ -34,7 +37,6 @@ with tab1:
     clients = run_async(get_clients())
 
     if clients:
-        # Создаём DataFrame
         df = pd.DataFrame(clients)
         df = df.rename(columns={
             "name": "Клиент",
@@ -43,26 +45,22 @@ with tab1:
             "messages_count": "Сообщений",
         })
 
-        # Показываем таблицу
         st.dataframe(
             df[["Клиент", "Встреч", "Чатов", "Сообщений"]],
             use_container_width=True,
             hide_index=True,
         )
 
-        # Статистика
         st.info(f"""
         **Всего клиентов:** {len(clients)}
         **Встреч:** {sum(c['meetings_count'] for c in clients)}
         **Telegram чатов:** {sum(c['chats_count'] for c in clients)}
         """)
     else:
-        st.warning("Клиенты не найдены. Запустите скрипт связывания:")
-        st.code("docker compose exec app python scripts/link_clients.py --preview")
+        st.warning("Клиенты не найдены. Создайте первого клиента ниже.")
 
     st.divider()
 
-    # Добавление нового клиента
     st.subheader("➕ Добавить клиента")
 
     with st.form("add_client_form"):
@@ -88,10 +86,8 @@ with tab2:
     clients = run_async(get_clients())
 
     if chats:
-        # Создаём DataFrame
         df = pd.DataFrame(chats)
 
-        # Показываем таблицу
         st.dataframe(
             df[["title", "client_name", "is_active", "messages_count"]].rename(columns={
                 "title": "Название чата",
@@ -105,7 +101,6 @@ with tab2:
 
         st.divider()
 
-        # Управление чатами
         st.subheader("🔧 Привязать чат к клиенту")
 
         col1, col2, col3 = st.columns([2, 2, 1])
@@ -126,7 +121,7 @@ with tab2:
             )
 
         with col3:
-            if st.button("Сохранить", type="primary"):
+            if st.button("Сохранить", type="primary", key="save_chat_client"):
                 if selected_chat:
                     run_async(update_chat_client(selected_chat[0], selected_client[0]))
                     st.success("Связь сохранена!")
@@ -134,7 +129,6 @@ with tab2:
 
         st.divider()
 
-        # Активация/деактивация
         st.subheader("🔌 Активировать/деактивировать")
 
         col1, col2 = st.columns(2)
@@ -158,17 +152,111 @@ with tab2:
 
                 if new_status != current_status:
                     run_async(toggle_chat_active(chat_for_toggle[0], new_status))
-                    st.success(f"Статус изменён на {'активен' if new_status else 'неактивен'}")
+                    st.success(f"Статус изменён")
                     st.rerun()
 
     else:
         st.info("Telegram чаты не найдены")
 
 # ============================================================================
-# Tab 3: Добавить чат
+# Tab 3: Не связанные встречи
 # ============================================================================
 
 with tab3:
+    st.subheader("Встречи без привязки к клиенту")
+
+    # Поиск
+    search_query = st.text_input("🔍 Поиск по названию", placeholder="Введите часть названия...")
+
+    # Получаем данные
+    meetings, total = run_async(get_unlinked_meetings(limit=50, search=search_query))
+    clients = run_async(get_clients())
+
+    st.metric("Всего не связанных", total)
+
+    if meetings:
+        # Таблица встреч
+        df = pd.DataFrame(meetings)
+        df["date_str"] = df["date"].apply(lambda x: x.strftime("%Y-%m-%d") if x else "—")
+        df["transcript"] = df["has_transcript"].apply(lambda x: "✅" if x else "❌")
+
+        st.dataframe(
+            df[["title", "date_str", "transcript"]].rename(columns={
+                "title": "Название",
+                "date_str": "Дата",
+                "transcript": "Транскрипт"
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+
+        # Быстрая привязка одной встречи
+        st.subheader("🔗 Быстрая привязка")
+
+        col1, col2, col3 = st.columns([3, 2, 1])
+
+        with col1:
+            selected_meeting = st.selectbox(
+                "Встреча",
+                options=[(m["id"], m["title"]) for m in meetings],
+                format_func=lambda x: x[1][:60] + "..." if len(x[1]) > 60 else x[1]
+            )
+
+        with col2:
+            client_for_link = st.selectbox(
+                "Клиент",
+                options=[(c["id"], c["name"]) for c in clients],
+                format_func=lambda x: x[1],
+                key="client_for_meeting"
+            )
+
+        with col3:
+            if st.button("Связать", type="primary"):
+                if selected_meeting and client_for_link:
+                    run_async(link_meeting_to_client(selected_meeting[0], client_for_link[0]))
+                    st.success("Связано!")
+                    st.rerun()
+
+        st.divider()
+
+        # Массовая привязка по паттерну
+        st.subheader("📦 Массовая привязка по паттерну")
+
+        st.info("Введите часть названия встречи — все встречи с этим текстом будут привязаны к выбранному клиенту")
+
+        col1, col2, col3 = st.columns([2, 2, 1])
+
+        with col1:
+            pattern = st.text_input("Паттерн", placeholder="Например: Timeweb")
+
+        with col2:
+            client_for_bulk = st.selectbox(
+                "Клиент",
+                options=[(c["id"], c["name"]) for c in clients],
+                format_func=lambda x: x[1],
+                key="client_for_bulk"
+            )
+
+        with col3:
+            if st.button("Применить", type="secondary"):
+                if pattern and client_for_bulk:
+                    updated = run_async(bulk_link_meetings_by_pattern(pattern, client_for_bulk[0]))
+                    st.success(f"Связано {updated} встреч!")
+                    st.rerun()
+
+    else:
+        if search_query:
+            st.info(f"Не найдено встреч по запросу '{search_query}'")
+        else:
+            st.success("Все встречи связаны с клиентами! 🎉")
+
+# ============================================================================
+# Tab 4: Добавить чат
+# ============================================================================
+
+with tab4:
     st.subheader("Добавить новый Telegram чат")
 
     st.info("""

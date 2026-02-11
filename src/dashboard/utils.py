@@ -335,3 +335,82 @@ async def get_telegram_chats_with_clients() -> list[dict]:
             }
             for row in rows
         ]
+
+
+# ============================================================================
+# Unlinked Meetings
+# ============================================================================
+
+async def get_unlinked_meetings(limit: int = 100, offset: int = 0, search: str = "") -> tuple[list[dict], int]:
+    """Получить встречи без привязки к клиенту"""
+    async with async_session_maker() as session:
+        # Базовый запрос
+        where_clause = "WHERE m.client_id IS NULL"
+        params = {"limit": limit, "offset": offset}
+
+        if search:
+            where_clause += " AND LOWER(m.title) LIKE :search"
+            params["search"] = f"%{search.lower()}%"
+
+        # Получаем встречи
+        result = await session.execute(
+            text(f"""
+                SELECT m.id, m.title, m.date,
+                       CASE WHEN m.transcript IS NOT NULL AND m.transcript != '' THEN true ELSE false END as has_transcript
+                FROM meetings m
+                {where_clause}
+                ORDER BY m.date DESC NULLS LAST
+                LIMIT :limit OFFSET :offset
+            """),
+            params
+        )
+        rows = result.fetchall()
+
+        # Получаем общее количество
+        count_result = await session.execute(
+            text(f"""
+                SELECT COUNT(*) FROM meetings m {where_clause}
+            """),
+            params
+        )
+        total = count_result.scalar()
+
+        return [
+            {
+                "id": str(row[0]),
+                "title": row[1],
+                "date": row[2],
+                "has_transcript": row[3],
+            }
+            for row in rows
+        ], total
+
+
+async def link_meeting_to_client(meeting_id: str, client_id: str):
+    """Привязать встречу к клиенту"""
+    from uuid import UUID
+    async with async_session_maker() as session:
+        await session.execute(
+            text("UPDATE meetings SET client_id = :client_id WHERE id = :meeting_id"),
+            {"client_id": client_id, "meeting_id": meeting_id}
+        )
+        await session.commit()
+
+
+async def bulk_link_meetings_by_pattern(pattern: str, client_id: str) -> int:
+    """Массово привязать встречи по паттерну в названии"""
+    from uuid import UUID
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("""
+                UPDATE meetings
+                SET client_id = :client_id
+                WHERE client_id IS NULL
+                  AND LOWER(title) LIKE :pattern
+                RETURNING id
+            """),
+            {"client_id": client_id, "pattern": f"%{pattern.lower()}%"}
+        )
+        updated = len(result.fetchall())
+        await session.commit()
+        return updated
