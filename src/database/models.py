@@ -52,14 +52,15 @@ class Client(Base):
     __tablename__ = "clients"
 
     id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255))
-    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)  # legacy
     todoist_project_id: Mapped[str | None] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
     meetings: Mapped[list["Meeting"]] = relationship(back_populates="client")
     hypotheses: Mapped[list["Hypothesis"]] = relationship(back_populates="client")
+    telegram_chats: Mapped[list["TelegramChat"]] = relationship(back_populates="client")
 
 
 class Lead(Base):
@@ -135,13 +136,15 @@ class TelegramChat(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # telegram chat_id
     title: Mapped[str] = mapped_column(String(500))
-    client_name: Mapped[str | None] = mapped_column(String(255))  # для связи с meetings по title
+    client_name: Mapped[str | None] = mapped_column(String(255))  # legacy: для совместимости
+    client_id: Mapped[UUID | None] = mapped_column(ForeignKey("clients.id"))  # связь с клиентом
     last_synced_message_id: Mapped[int | None] = mapped_column(BigInteger)
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
     messages: Mapped[list["TelegramMessage"]] = relationship(back_populates="chat")
+    client: Mapped["Client"] = relationship(back_populates="telegram_chats")
 
 
 class TelegramMessage(Base):

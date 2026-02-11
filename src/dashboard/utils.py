@@ -9,7 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database.connection import async_session_maker
-from src.database.models import Settings, TelegramChat, Meeting, Embedding, TelegramEmbedding
+from src.database.models import Settings, TelegramChat, TelegramMessage, Meeting, Embedding, TelegramEmbedding, Client
 
 
 def run_async(coro):
@@ -175,3 +175,163 @@ async def toggle_chat_active(chat_id: int, is_active: bool):
         if chat:
             chat.is_active = is_active
             await session.commit()
+
+
+# ============================================================================
+# Clients
+# ============================================================================
+
+async def get_clients() -> list[dict]:
+    """Получить список всех клиентов с статистикой"""
+    async with async_session_maker() as session:
+        # Получаем клиентов с подсчётом встреч и чатов
+        result = await session.execute(
+            text("""
+                SELECT
+                    c.id,
+                    c.name,
+                    c.created_at,
+                    COUNT(DISTINCT m.id) as meetings_count,
+                    COUNT(DISTINCT tc.id) as chats_count,
+                    COUNT(DISTINCT tm.id) as messages_count
+                FROM clients c
+                LEFT JOIN meetings m ON m.client_id = c.id
+                LEFT JOIN telegram_chats tc ON tc.client_id = c.id
+                LEFT JOIN telegram_messages tm ON tm.chat_id = tc.id
+                GROUP BY c.id, c.name, c.created_at
+                ORDER BY c.name
+            """)
+        )
+        rows = result.fetchall()
+        return [
+            {
+                "id": str(row[0]),
+                "name": row[1],
+                "created_at": row[2],
+                "meetings_count": row[3],
+                "chats_count": row[4],
+                "messages_count": row[5],
+            }
+            for row in rows
+        ]
+
+
+async def create_client(name: str) -> dict | None:
+    """Создать нового клиента"""
+    async with async_session_maker() as session:
+        # Проверяем уникальность
+        result = await session.execute(
+            select(Client).where(Client.name == name)
+        )
+        if result.scalar_one_or_none():
+            return None  # Клиент уже существует
+
+        client = Client(name=name)
+        session.add(client)
+        await session.commit()
+        await session.refresh(client)
+
+        return {
+            "id": str(client.id),
+            "name": client.name,
+        }
+
+
+async def delete_client(client_id: str) -> bool:
+    """Удалить клиента (только если нет связанных данных)"""
+    from uuid import UUID
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Client).where(Client.id == UUID(client_id))
+        )
+        client = result.scalar_one_or_none()
+        if not client:
+            return False
+
+        # Проверяем, есть ли связанные встречи или чаты
+        meetings_count = await session.execute(
+            text("SELECT COUNT(*) FROM meetings WHERE client_id = :cid"),
+            {"cid": client_id}
+        )
+        if meetings_count.scalar() > 0:
+            return False  # Есть связанные встречи
+
+        await session.delete(client)
+        await session.commit()
+        return True
+
+
+async def update_chat_client(chat_id: int, client_id: str | None):
+    """Привязать чат к клиенту"""
+    from uuid import UUID
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(TelegramChat).where(TelegramChat.id == chat_id)
+        )
+        chat = result.scalar_one_or_none()
+        if chat:
+            chat.client_id = UUID(client_id) if client_id else None
+            await session.commit()
+
+
+async def create_telegram_chat(chat_id: int, title: str, client_id: str | None = None) -> dict | None:
+    """Создать новый Telegram чат"""
+    from uuid import UUID
+    async with async_session_maker() as session:
+        # Проверяем, не существует ли уже
+        result = await session.execute(
+            select(TelegramChat).where(TelegramChat.id == chat_id)
+        )
+        if result.scalar_one_or_none():
+            return None  # Чат уже существует
+
+        chat = TelegramChat(
+            id=chat_id,
+            title=title,
+            client_id=UUID(client_id) if client_id else None,
+            is_active=True,
+        )
+        session.add(chat)
+        await session.commit()
+
+        return {
+            "id": chat.id,
+            "title": chat.title,
+        }
+
+
+async def get_telegram_chats_with_clients() -> list[dict]:
+    """Получить список Telegram чатов с информацией о клиентах"""
+    async with async_session_maker() as session:
+        result = await session.execute(
+            text("""
+                SELECT
+                    tc.id,
+                    tc.title,
+                    tc.client_name,
+                    tc.client_id,
+                    c.name as client_display_name,
+                    tc.is_active,
+                    tc.last_synced_message_id,
+                    COUNT(tm.id) as messages_count
+                FROM telegram_chats tc
+                LEFT JOIN clients c ON tc.client_id = c.id
+                LEFT JOIN telegram_messages tm ON tm.chat_id = tc.id
+                GROUP BY tc.id, tc.title, tc.client_name, tc.client_id, c.name, tc.is_active, tc.last_synced_message_id
+                ORDER BY tc.title
+            """)
+        )
+        rows = result.fetchall()
+        return [
+            {
+                "id": row[0],
+                "title": row[1],
+                "client_name_legacy": row[2],
+                "client_id": str(row[3]) if row[3] else None,
+                "client_name": row[4],
+                "is_active": row[5],
+                "last_synced": row[6],
+                "messages_count": row[7],
+            }
+            for row in rows
+        ]

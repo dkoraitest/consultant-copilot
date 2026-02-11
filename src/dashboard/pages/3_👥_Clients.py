@@ -4,100 +4,228 @@
 import streamlit as st
 import pandas as pd
 
-from src.dashboard.utils import run_async, get_telegram_chats, toggle_chat_active
+from src.dashboard.utils import (
+    run_async,
+    get_clients,
+    create_client,
+    get_telegram_chats_with_clients,
+    update_chat_client,
+    create_telegram_chat,
+    toggle_chat_active,
+)
 
 st.set_page_config(page_title="Clients - Consultant Copilot", page_icon="👥", layout="wide")
 
 st.title("👥 Клиенты и Telegram чаты")
 
 # ============================================================================
-# Telegram чаты
+# Вкладки
 # ============================================================================
 
-st.subheader("📱 Telegram чаты")
+tab1, tab2, tab3 = st.tabs(["📋 Клиенты", "📱 Telegram чаты", "➕ Добавить чат"])
 
-chats = run_async(get_telegram_chats())
+# ============================================================================
+# Tab 1: Клиенты
+# ============================================================================
 
-if chats:
-    # Создаём DataFrame
-    df = pd.DataFrame(chats)
-    df = df.rename(columns={
-        "id": "ID",
-        "title": "Название",
-        "client_name": "Клиент",
-        "is_active": "Активен",
-        "last_synced": "Последний синхр. ID"
-    })
+with tab1:
+    st.subheader("Список клиентов")
 
-    # Показываем таблицу
-    st.dataframe(
-        df,
-        use_container_width=True,
-        column_config={
-            "Активен": st.column_config.CheckboxColumn("Активен", default=True),
-        }
-    )
+    clients = run_async(get_clients())
+
+    if clients:
+        # Создаём DataFrame
+        df = pd.DataFrame(clients)
+        df = df.rename(columns={
+            "name": "Клиент",
+            "meetings_count": "Встреч",
+            "chats_count": "Чатов",
+            "messages_count": "Сообщений",
+        })
+
+        # Показываем таблицу
+        st.dataframe(
+            df[["Клиент", "Встреч", "Чатов", "Сообщений"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Статистика
+        st.info(f"""
+        **Всего клиентов:** {len(clients)}
+        **Встреч:** {sum(c['meetings_count'] for c in clients)}
+        **Telegram чатов:** {sum(c['chats_count'] for c in clients)}
+        """)
+    else:
+        st.warning("Клиенты не найдены. Запустите скрипт связывания:")
+        st.code("docker compose exec app python scripts/link_clients.py --preview")
 
     st.divider()
 
-    # Управление активностью
-    st.subheader("🔧 Управление чатами")
+    # Добавление нового клиента
+    st.subheader("➕ Добавить клиента")
 
-    col1, col2 = st.columns(2)
+    with st.form("add_client_form"):
+        new_client_name = st.text_input("Имя клиента", placeholder="Например: Timeweb Cloud")
+        submit = st.form_submit_button("Добавить", type="primary")
 
-    with col1:
-        selected_chat = st.selectbox(
-            "Выберите чат",
-            options=[(c["id"], c["title"]) for c in chats],
-            format_func=lambda x: x[1]
+        if submit and new_client_name:
+            result = run_async(create_client(new_client_name.strip()))
+            if result:
+                st.success(f"Клиент '{new_client_name}' создан!")
+                st.rerun()
+            else:
+                st.error(f"Клиент с именем '{new_client_name}' уже существует")
+
+# ============================================================================
+# Tab 2: Telegram чаты
+# ============================================================================
+
+with tab2:
+    st.subheader("Telegram чаты")
+
+    chats = run_async(get_telegram_chats_with_clients())
+    clients = run_async(get_clients())
+
+    if chats:
+        # Создаём DataFrame
+        df = pd.DataFrame(chats)
+
+        # Показываем таблицу
+        st.dataframe(
+            df[["title", "client_name", "is_active", "messages_count"]].rename(columns={
+                "title": "Название чата",
+                "client_name": "Клиент",
+                "is_active": "Активен",
+                "messages_count": "Сообщений",
+            }),
+            use_container_width=True,
+            hide_index=True,
         )
 
-    with col2:
-        if selected_chat:
-            chat_info = next((c for c in chats if c["id"] == selected_chat[0]), None)
-            if chat_info:
-                current_status = chat_info["is_active"]
+        st.divider()
+
+        # Управление чатами
+        st.subheader("🔧 Привязать чат к клиенту")
+
+        col1, col2, col3 = st.columns([2, 2, 1])
+
+        with col1:
+            selected_chat = st.selectbox(
+                "Выберите чат",
+                options=[(c["id"], c["title"]) for c in chats],
+                format_func=lambda x: x[1]
+            )
+
+        with col2:
+            client_options = [(None, "— Не выбран —")] + [(c["id"], c["name"]) for c in clients]
+            selected_client = st.selectbox(
+                "Выберите клиента",
+                options=client_options,
+                format_func=lambda x: x[1]
+            )
+
+        with col3:
+            if st.button("Сохранить", type="primary"):
+                if selected_chat:
+                    run_async(update_chat_client(selected_chat[0], selected_client[0]))
+                    st.success("Связь сохранена!")
+                    st.rerun()
+
+        st.divider()
+
+        # Активация/деактивация
+        st.subheader("🔌 Активировать/деактивировать")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            chat_for_toggle = st.selectbox(
+                "Чат",
+                options=[(c["id"], c["title"], c["is_active"]) for c in chats],
+                format_func=lambda x: f"{'✅' if x[2] else '❌'} {x[1]}",
+                key="chat_toggle_select"
+            )
+
+        with col2:
+            if chat_for_toggle:
+                current_status = chat_for_toggle[2]
                 new_status = st.toggle(
                     "Активен",
                     value=current_status,
-                    key=f"toggle_{selected_chat[0]}"
+                    key=f"toggle_{chat_for_toggle[0]}"
                 )
 
                 if new_status != current_status:
-                    run_async(toggle_chat_active(selected_chat[0], new_status))
-                    st.success(f"Статус чата '{selected_chat[1]}' изменён на {'активен' if new_status else 'неактивен'}")
+                    run_async(toggle_chat_active(chat_for_toggle[0], new_status))
+                    st.success(f"Статус изменён на {'активен' if new_status else 'неактивен'}")
                     st.rerun()
 
-else:
-    st.info("Telegram чаты не найдены")
-
-st.divider()
+    else:
+        st.info("Telegram чаты не найдены")
 
 # ============================================================================
-# Добавление нового чата
+# Tab 3: Добавить чат
 # ============================================================================
 
-st.subheader("➕ Добавить новый чат")
+with tab3:
+    st.subheader("Добавить новый Telegram чат")
 
-st.warning("""
-**Примечание:** Для добавления нового чата нужно:
-1. Узнать chat_id (через @userinfobot или Telegram Desktop)
-2. Добавить чат через код или API
-3. Перезапустить telegram_watcher
+    st.info("""
+    **Как найти chat_id:**
+    1. Откройте Telegram Desktop
+    2. Правый клик на чат → Copy Link
+    3. ID будет в ссылке (например, для группы: -1001234567890)
 
-Пока что эта функция требует ручной настройки.
-""")
-
-with st.expander("📋 Как найти chat_id"):
-    st.markdown("""
-    1. **Telegram Desktop:**
-       - Правый клик на чат → Copy Link
-       - ID будет в ссылке (например, -1001234567890)
-
-    2. **@userinfobot:**
-       - Перешлите сообщение из чата боту
-       - Бот покажет ID чата
-
-    3. **Через API:**
-       - Используйте метод `getUpdates` или `getChat`
+    Или переслите сообщение боту @userinfobot
     """)
+
+    clients = run_async(get_clients())
+
+    with st.form("add_chat_form"):
+        chat_id = st.number_input(
+            "Chat ID",
+            value=0,
+            step=1,
+            help="Числовой ID чата в Telegram (может быть отрицательным для групп)"
+        )
+
+        chat_title = st.text_input(
+            "Название чата",
+            placeholder="Например: Project X & Dima"
+        )
+
+        client_options = [(None, "— Не выбран —")] + [(c["id"], c["name"]) for c in clients]
+        client_id = st.selectbox(
+            "Клиент",
+            options=client_options,
+            format_func=lambda x: x[1]
+        )
+
+        submit = st.form_submit_button("Добавить чат", type="primary")
+
+        if submit:
+            if chat_id == 0:
+                st.error("Введите chat_id")
+            elif not chat_title:
+                st.error("Введите название чата")
+            else:
+                result = run_async(create_telegram_chat(
+                    chat_id=int(chat_id),
+                    title=chat_title,
+                    client_id=client_id[0] if client_id else None
+                ))
+
+                if result:
+                    st.success(f"Чат '{chat_title}' добавлен!")
+                    st.info("""
+                    **Следующие шаги:**
+                    1. Перезапустите telegram_watcher для начала мониторинга
+                    2. Или запустите синхронизацию вручную через API
+
+                    ```bash
+                    docker compose restart telegram_watcher
+                    ```
+                    """)
+                else:
+                    st.error(f"Чат с ID {chat_id} уже существует")

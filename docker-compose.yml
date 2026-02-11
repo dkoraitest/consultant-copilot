@@ -124,6 +124,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://copilot:${DB_PASSWORD}@db:5432/copilot
+      PYTHONPATH: /app
     depends_on:
       db:
         condition: service_healthy
